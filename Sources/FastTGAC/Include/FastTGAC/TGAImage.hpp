@@ -16,7 +16,7 @@ enum class TGAErrorCode: int {
     other
 };
 
-#define TGA_ERROR_OTHER_MESSAGE_SIZE 64
+#define TGA_ERROR_OTHER_MESSAGE_SIZE 128
 
 struct TGAError final {
     bool error;

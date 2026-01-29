@@ -171,8 +171,8 @@ static bool tga_validate(const char* fn_nonnull filePath fn_noescape,
         return false;
     }
     
-    auto newTGAFormat = std::memcmp(footer.signature, "TRUEVISION-XFILE", 16) == 0;
 #if DEBUG
+    auto newTGAFormat = std::memcmp(footer.signature, "TRUEVISION-XFILE", 16) == 0;
     if (newTGAFormat) {
         printf("New TGA Format\n");
     }
@@ -271,8 +271,8 @@ static bool tga_validate(const char* fn_nonnull filePath fn_noescape,
     //    tga_close_file_if_not_equal(file, inFile, error);
     //    return false;
     //}
-    if (imageType != 1 && imageType != 2) {
-        tga_error_other(error, "Only \"Uncompressed, True-color Image\" is supported");
+    if (imageType != 1 && imageType != 2 && imageType != 3) {
+        tga_error_other(error, "Only uncompressed images are supported");
         tga_close_file_if_not_equal(file, inFile, error);
         return false;
     }
@@ -412,7 +412,7 @@ TGAImage* fn_nullable TGAImage::load(const char* fn_nonnull filePath fn_noescape
         uint8_t a;
     };
     ColorMapEntry* colorMapEntries = nullptr;
-    if ((header.colorMapType & 0xF) == 1) {
+    if ((header.colorMapType & 0x7F) == 1) {
         // Go to color map data section
         auto colorMapOffset = sizeof(TGAHeader) + imageIdLength;
         auto result = std::fseek(file, colorMapOffset, SEEK_SET);
@@ -521,8 +521,9 @@ TGAImage* fn_nullable TGAImage::load(const char* fn_nonnull filePath fn_noescape
     long numComponents = 0;
     long imageDataSize = 0;
     char* imageData = nullptr;
+    auto imageType = header.imageType & 0x7F;
     // Uncompressed, Color-mapped Image
-    if (header.imageType == 1) {
+    if (imageType == 1) {
         // Allocate image data
         numComponents = colorMapNumComponents;
         imageDataSize = header.width * header.height * numComponents;
@@ -613,33 +614,34 @@ TGAImage* fn_nullable TGAImage::load(const char* fn_nonnull filePath fn_noescape
         }
     }
     // Uncompressed, True-color Image
-    else if (header.imageType == 2) {
-        // Allocate image data
+    else if (imageType == 2) {
+        // Determine number of components
+#if 1
+        auto alphaChannelBits = header.imageDescriptor & 0b00001111;
+        numComponents = alphaChannelBits ? 4 : 3;
+        auto pixelWithoutAlphaSize = header.pixelDepth - alphaChannelBits;
+        auto componentSize = pixelWithoutAlphaSize / 3;
+        if (pixelWithoutAlphaSize != 24 || componentSize != 8 || (alphaChannelBits != 0 && alphaChannelBits != 8)) {
+            tga_error_other(error, "Only 8-bit channel 24-bit RGB or 32-bit RGBA textures are supported. Pixel depth: %d, alpha channel bits: %d", header.pixelDepth, alphaChannelBits);
+            tga_close_file(file, error);
+            delete [] rawData;
+            if (colorMapEntries != nullptr) {
+                delete [] colorMapEntries;
+            }
+            return nullptr;
+        }
+#else
+        // Actually wrong formula
         numComponents = header.pixelDepth / 8;
+#endif
+        
+        // Allocate image data
         imageDataSize = header.width * header.height * numComponents;
         imageData = new char[imageDataSize];
         
         // Turn image upside down
         auto rowSize = header.width * numComponents;
-        if (numComponents == 1) {
-            for (auto y = 0; y < header.height; y++) {
-                auto sourceIndex = header.height - y - 1;
-                auto source = rawData + sourceIndex * rowSize;
-                auto destination = imageData + y * rowSize;
-                
-#if 1
-                memcpy(destination, source, rowSize);
-#else
-                for (auto x = 0; x < header.width; x++) {
-                    destination[0] = source[0];
-                    
-                    source += 1;
-                    destination += 1;
-                }
-#endif
-            }
-        }
-        else if (numComponents == 3) {
+        if (numComponents == 3) {
             for (auto y = 0; y < header.height; y++) {
                 auto sourceIndex = header.height - y - 1;
                 auto source = rawData + sourceIndex * rowSize;
@@ -682,8 +684,55 @@ TGAImage* fn_nullable TGAImage::load(const char* fn_nonnull filePath fn_noescape
             return nullptr;
         }
     }
+    else if (imageType == 3) {
+        // Sanity check
+        auto alphaChannelBits = header.imageDescriptor & 0b00001111;
+        if (alphaChannelBits != 0) {
+            tga_error_other(error, "Alpha channel bits are not supported in one-channel images. Alpha channel bits: %d", alphaChannelBits);
+            tga_close_file(file, error);
+            delete [] rawData;
+            if (colorMapEntries != nullptr) {
+                delete [] colorMapEntries;
+            }
+            return nullptr;
+        }
+        if (header.pixelDepth != 8) {
+            tga_error_other(error, "Only 8-bit pixel depth is supported in one-channel images. Pixel depth: %d", header.pixelDepth);
+            tga_close_file(file, error);
+            delete [] rawData;
+            if (colorMapEntries != nullptr) {
+                delete [] colorMapEntries;
+            }
+            return nullptr;
+        }
+        
+        numComponents = 1;
+        
+        // Allocate image data
+        imageDataSize = header.width * header.height * numComponents;
+        imageData = new char[imageDataSize];
+        
+        // Turn image upside down
+        auto rowSize = header.width * numComponents;
+        for (auto y = 0; y < header.height; y++) {
+            auto sourceIndex = header.height - y - 1;
+            auto source = rawData + sourceIndex * rowSize;
+            auto destination = imageData + y * rowSize;
+            
+#if 1
+            memcpy(destination, source, rowSize);
+#else
+            for (auto x = 0; x < header.width; x++) {
+                destination[0] = source[0];
+                
+                source += 1;
+                destination += 1;
+            }
+#endif
+        }
+    }
     else {
-        tga_error_other(error, "Unsupported image type: %d", header.imageType);
+        tga_error_other(error, "Unsupported image type: %d", imageType);
         tga_close_file(file, error);
         if (rawData != nullptr) {
             delete [] rawData;
@@ -696,6 +745,7 @@ TGAImage* fn_nullable TGAImage::load(const char* fn_nonnull filePath fn_noescape
     
     
     // Developer data
+    //
     
     
     // Clean up raw data

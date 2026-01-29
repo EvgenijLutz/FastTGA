@@ -6,8 +6,3 @@
 //
 
 #include <FastTGAC/FastTGAC.hpp>
-
-
-struct TGAHeader {
-    
-};
