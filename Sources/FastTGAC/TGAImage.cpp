@@ -686,16 +686,16 @@ TGAImage* fn_nullable TGAImage::load(const char* fn_nonnull filePath fn_noescape
     }
     else if (imageType == 3) {
         // Sanity check
-        auto alphaChannelBits = header.imageDescriptor & 0b00001111;
-        if (alphaChannelBits != 0) {
-            tga_error_other(error, "Alpha channel bits are not supported in one-channel images. Alpha channel bits: %d", alphaChannelBits);
-            tga_close_file(file, error);
-            delete [] rawData;
-            if (colorMapEntries != nullptr) {
-                delete [] colorMapEntries;
-            }
-            return nullptr;
-        }
+        //auto alphaChannelBits = header.imageDescriptor & 0b00001111;
+        //if (alphaChannelBits != 0) {
+        //    tga_error_other(error, "Alpha channel bits are not supported in one-channel images. Alpha channel bits: %d", alphaChannelBits);
+        //    tga_close_file(file, error);
+        //    delete [] rawData;
+        //    if (colorMapEntries != nullptr) {
+        //        delete [] colorMapEntries;
+        //    }
+        //    return nullptr;
+        //}
         if (header.pixelDepth != 8) {
             tga_error_other(error, "Only 8-bit pixel depth is supported in one-channel images. Pixel depth: %d", header.pixelDepth);
             tga_close_file(file, error);
