@@ -8,7 +8,9 @@
 #include <FastTGAC/TGAImage.hpp>
 
 
-void tga_error_reset(TGAError* fn_nullable error fn_noescape) {
+// MARK: Error
+
+static void tga_error_reset(TGAError* fn_nullable error fn_noescape) {
     if (error == nullptr) {
         return;
     }
@@ -16,17 +18,17 @@ void tga_error_reset(TGAError* fn_nullable error fn_noescape) {
     memset(error, 0, sizeof(TGAError));
 }
 
-void tga_error_notImplemented(TGAError* fn_nullable error fn_noescape) {
-    if (error == nullptr) {
-        return;
-    }
-    
-    error->error = true;
-    error->code = TGAErrorCode::notImplemented;
-}
+//static void tga_error_notImplemented(TGAError* fn_nullable error fn_noescape) {
+//    if (error == nullptr) {
+//        return;
+//    }
+//    
+//    error->error = true;
+//    error->code = TGAErrorCode::notImplemented;
+//}
 
-void tga_error_other(TGAError* fn_nullable error fn_noescape, const char* fn_nonnull __restrict format, ...) __printflike(2, 3);
-void tga_error_other(TGAError* fn_nullable error fn_noescape, const char* fn_nonnull __restrict format, ...) {
+static void tga_error_other(TGAError* fn_nullable error fn_noescape, const char* fn_nonnull __restrict format, ...) __printflike(2, 3);
+static void tga_error_other(TGAError* fn_nullable error fn_noescape, const char* fn_nonnull __restrict format, ...) {
     if (error == nullptr) {
         return;
     }
@@ -43,6 +45,8 @@ void tga_error_other(TGAError* fn_nullable error fn_noescape, const char* fn_non
     printf("%s\n", error->other.message);
 }
 
+
+// MARK: TGAImage
 
 TGAImage::TGAImage(long width, long height, long numComponents, char* fn_nonnull contents, long size):
 _referenceCounter(1),
@@ -116,58 +120,131 @@ static bool tga_close_file(FILE* fn_nullable file, TGAError* fn_nullable error f
 }
 
 
-static bool tga_close_file_if_not_equal(FILE* fn_nullable file, FILE* fn_nullable other, TGAError* fn_nullable error fn_noescape) {
-    if (file == other) {
-        return true;
+struct TGAReaderContext {
+    bool isFile;
+    union {
+        FILE* fn_nonnull file;
+        
+        struct {
+            union {
+                const void* fn_nonnull buffer;
+                const char* fn_nonnull charBuffer;
+            };
+             long bufferSize;
+        } data;
+    };
+    long position;
+    
+    
+    TGAReaderContext(const char* fn_nonnull path, TGAError* fn_nullable error fn_noescape) {
+        isFile = true;
+        file = tga_open_file(path, error);
+        position = 0;
     }
     
-    return tga_close_file(file, error);
-}
-
-
-static bool tga_validate(const char* fn_nonnull filePath fn_noescape,
-                         TGAError* fn_nullable error fn_noescape,
-                         FILE* inFile,
-                         TGAHeader* outHeader,
-                         TGAFooter* outFooter) {
-    tga_error_reset(error);
     
-    // Open file
-    auto file = inFile;
-    if (file == nullptr) {
-        file = tga_open_file(filePath, error);
-        if (file == nullptr) {
-            return false;
+    TGAReaderContext(const void* fn_nonnull buffer, long bufferSize) {
+        isFile = false;
+        data = {
+            .buffer = buffer,
+            .bufferSize = bufferSize
+        };
+        position = 0;
+    }
+    
+    
+    static TGAReaderContext fromSource(const TGASource& source, TGAError* fn_nullable error fn_noescape) {
+        if (source.usePath) {
+            return TGAReaderContext(source.path, error);
+        }
+        
+        return TGAReaderContext(source.buffer, source.bufferSize);
+    }
+    
+    
+    ~TGAReaderContext() {
+        if (isFile && file) {
+            fclose(file);
         }
     }
     
     
+    long getPosition() {
+        return position;
+    }
+    
+    
+    bool setPosition(long newPosition, TGAError* fn_nullable error fn_noescape) {
+        if (isFile) {
+            // Set to the desired position or to the end if negative
+            long pos = newPosition < 0 ? 0 : newPosition;
+            int pivot = newPosition < 0 ? SEEK_END : SEEK_SET;
+            
+            auto result = std::fseek(file, pos, pivot);
+            if (result != 0) {
+                tga_error_other(error, "Could not reach the end of the file: %s", strerror(errno));
+                tga_close_file(file, error);
+                return false;
+            }
+            
+            // Update position
+            position = ftell(file);
+        }
+        else {
+            position = newPosition < 0 ? data.bufferSize : newPosition;
+        }
+        
+        return true;
+    }
+    
+    
+    bool read(void* out, long size, TGAError* fn_nullable error fn_noescape) {
+        if (isFile) {
+            auto read = std::fread(out, size, 1, file);
+            if (read != 1) {
+                tga_error_other(error, "Could not read image data: %s", strerror(errno));
+                return false;
+            }
+        }
+        else {
+            if (position + size > data.bufferSize) {
+                tga_error_other(error, "Trying to read more (%ld) than available (%ld).", size, data.bufferSize - position);
+                return false;
+            }
+            std::memcpy(out, data.charBuffer + position, size);
+        }
+        
+        position += size;
+        
+        return true;
+    }
+    
+};
+
+
+static bool tga_validate(TGAReaderContext& context,
+                         TGAError* fn_nullable error fn_noescape,
+                         TGAHeader* outHeader,
+                         TGAFooter* outFooter) {
+    tga_error_reset(error);
+    
     // 1. Read the footer
     
     // Go to the end of file
-    auto result = std::fseek(file, 0, SEEK_END);
-    if (result != 0) {
-        tga_error_other(error, "Could not reach the end of the file: %s", strerror(errno));
-        tga_close_file_if_not_equal(file, inFile, error);
+    if (context.setPosition(-1, error) == false) {
         return false;
     }
     
     // Get file size
-    auto size = ftell(file);
+    auto size = context.getPosition();
     
     // Read the footer to determine if it's the "New TGA Format", otherwise it may be the old TGA
-    result = std::fseek(file, size - sizeof(TGAFooter), SEEK_SET);
-    if (result != 0) {
-        tga_error_other(error, "Could not set the file position: %s", strerror(errno));
-        tga_close_file_if_not_equal(file, inFile, error);
+    if (context.setPosition(size - sizeof(TGAFooter), error) == false) {
         return false;
     }
     
     TGAFooter footer;
-    auto read = std::fread(&footer, sizeof(TGAFooter), 1, file);
-    if (read != 1) {
-        tga_error_other(error, "Could not read the footer: %s", strerror(errno));
-        tga_close_file_if_not_equal(file, inFile, error);
+    if (context.read(&footer, sizeof(TGAFooter), error) == false) {
         return false;
     }
     
@@ -182,18 +259,12 @@ static bool tga_validate(const char* fn_nonnull filePath fn_noescape,
     // 2. Read the header
     
     // Go to the start of file
-    result = std::fseek(file, 0, SEEK_SET);
-    if (result != 0) {
-        tga_error_other(error, "Could not set the file position: %s", strerror(errno));
-        tga_close_file_if_not_equal(file, inFile, error);
+    if (context.setPosition(0, error) == false) {
         return false;
     }
     
     TGAHeader header;
-    read = std::fread(&header, sizeof(TGAHeader), 1, file);
-    if (read != 1) {
-        tga_error_other(error, "Could not read the header: %s", strerror(errno));
-        tga_close_file_if_not_equal(file, inFile, error);
+    if (context.read(&header, sizeof(TGAHeader), error) == false) {
         return false;
     }
     
@@ -238,7 +309,6 @@ static bool tga_validate(const char* fn_nonnull filePath fn_noescape,
     auto colorMapType = static_cast<int>(header.colorMapType & 0x7F);
     if (colorMapType != 0 && colorMapType != 1) {
         tga_error_other(error, "Unknown color map type (%d), probably not TGA", colorMapType);
-        tga_close_file_if_not_equal(file, inFile, error);
         return false;
     }
     
@@ -248,19 +318,16 @@ static bool tga_validate(const char* fn_nonnull filePath fn_noescape,
         imageType != 1 && imageType != 2 && imageType != 3 &&
         imageType != 9 && imageType != 10 && imageType != 11) {
         tga_error_other(error, "Unknown image type (%d), probably not TGA", static_cast<int>(imageType));
-        tga_close_file_if_not_equal(file, inFile, error);
         return false;
     }
     
     // Size
     if (header.width == 0 || header.height == 0) {
         tga_error_other(error, "Suspicious image size %dx%d, probably not TGA", header.width, header.height);
-        tga_close_file_if_not_equal(file, inFile, error);
         return false;
     }
     if (header.width > 16384 || header.height > 16384) {
         tga_error_other(error, "Suspiciously big image size %dx%d, probably not TGA", header.width, header.height);
-        tga_close_file_if_not_equal(file, inFile, error);
         return false;
     }
     
@@ -273,22 +340,18 @@ static bool tga_validate(const char* fn_nonnull filePath fn_noescape,
     //}
     if (imageType != 1 && imageType != 2 && imageType != 3) {
         tga_error_other(error, "Only uncompressed images are supported");
-        tga_close_file_if_not_equal(file, inFile, error);
         return false;
     }
     if (header.colorMapFirstEntryIndex != 0) {
         tga_error_other(error, "Color map first entry index is not supported");
-        tga_close_file_if_not_equal(file, inFile, error);
         return false;
     }
     if (header.colorMapEntrySize % 8 != 0) {
         tga_error_other(error, "Only color map entry size multiple of 8 bits is supported");
-        tga_close_file_if_not_equal(file, inFile, error);
         return false;
     }
     if (header.colorMapEntrySize != 0 && header.colorMapEntrySize != 16 && header.colorMapEntrySize != 24 && header.colorMapEntrySize != 32) {
         tga_error_other(error, "Unsupported color map entry size: %d", header.colorMapEntrySize);
-        tga_close_file_if_not_equal(file, inFile, error);
         return false;
     }
     //if (header.colorMapFirstEntryIndex != 0 || header.colorMapLength != 0 || header.colorMapEntrySize != 0) {
@@ -298,12 +361,10 @@ static bool tga_validate(const char* fn_nonnull filePath fn_noescape,
     //}
     if (header.xOrigin != 0 || header.yOrigin != 0) {
         tga_error_other(error, "Image origin is not supported");
-        tga_close_file_if_not_equal(file, inFile, error);
         return false;
     }
     if (header.pixelDepth % 8 != 0) {
         tga_error_other(error, "Only pixel depths multiple of 8 bits are supported");
-        tga_close_file_if_not_equal(file, inFile, error);
         return false;
     }
     //if (std::min(header.pixelDepth / 3, 8) != 8) {
@@ -318,24 +379,18 @@ static bool tga_validate(const char* fn_nonnull filePath fn_noescape,
     //}
     if ((header.imageDescriptor & 0b00110000) != 0) {
         tga_error_other(error, "Image origin direction is not supported");
-        tga_close_file_if_not_equal(file, inFile, error);
         return false;
     }
     auto alphaChannelBits = header.imageDescriptor & 0b00001111;
     if (alphaChannelBits != 0 && alphaChannelBits != 8) {
         tga_error_other(error, "Either no alpha channel or alpha channels with 8 bits are supported");
-        tga_close_file_if_not_equal(file, inFile, error);
         return false;
     }
     if ((imageType == 1 || imageType == 9) && (alphaChannelBits != 0)) {
         tga_error_other(error, "Aplha channel info in the image descriptior is not supported when image is color-mapped");
-        tga_close_file_if_not_equal(file, inFile, error);
         return false;
     }
     
-    
-    // Close file if needed
-    tga_close_file_if_not_equal(file, inFile, error);
     
     // Return header
     if (outHeader) {
@@ -352,23 +407,26 @@ static bool tga_validate(const char* fn_nonnull filePath fn_noescape,
 }
 
 
-bool TGAImage::isTGA(const char* fn_nonnull filePath fn_noescape, TGAError* fn_nullable error fn_noescape) {
-    return tga_validate(filePath, error, nullptr, nullptr, nullptr);
+bool TGAImage::isTGA(const TGASource& source fn_noescape, TGAError* fn_nullable error fn_noescape) {
+    auto context = TGAReaderContext::fromSource(source, error);
+    if (context.file == nullptr) {
+        return false;
+    }
+    return tga_validate(context, error, nullptr, nullptr);
 }
 
 
-TGAImage* fn_nullable TGAImage::load(const char* fn_nonnull filePath fn_noescape, TGAError* fn_nullable error fn_noescape) {
+TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAError* fn_nullable error fn_noescape) {
     // Open file
-    auto file = tga_open_file(filePath, error);
-    if (file == nullptr) {
+    auto context = TGAReaderContext::fromSource(source, error);
+    if (context.file == nullptr) {
         return nullptr;
     }
     
     // Validate TGA
     TGAHeader header;
     TGAFooter footer;
-    if (tga_validate(filePath, error, file, &header, &footer) == false) {
-        tga_close_file(file, error);
+    if (tga_validate(context, error, &header, &footer) == false) {
         return nullptr;
     }
     
@@ -380,17 +438,11 @@ TGAImage* fn_nullable TGAImage::load(const char* fn_nonnull filePath fn_noescape
     imageId[0] = 0;
     if (imageIdLength > 0) {
         auto idDataOffset = sizeof(TGAHeader);
-        auto result = std::fseek(file, idDataOffset, SEEK_SET);
-        if (result != 0) {
-            tga_error_other(error, "Could not set the file position: %s", strerror(errno));
-            tga_close_file(file, error);
+        if (context.setPosition(idDataOffset, error) == false) {
             return nullptr;
         }
         
-        auto read = std::fread(imageId, imageIdLength, 1, file);
-        if (read != 1) {
-            tga_error_other(error, "Could not read image data: %s", strerror(errno));
-            tga_close_file(file, error);
+        if (context.read(imageId, imageIdLength, error) == false) {
             return nullptr;
         }
         imageId[imageIdLength] = 0;
@@ -415,19 +467,13 @@ TGAImage* fn_nullable TGAImage::load(const char* fn_nonnull filePath fn_noescape
     if ((header.colorMapType & 0x7F) == 1) {
         // Go to color map data section
         auto colorMapOffset = sizeof(TGAHeader) + imageIdLength;
-        auto result = std::fseek(file, colorMapOffset, SEEK_SET);
-        if (result != 0) {
-            tga_error_other(error, "Could not set the file position: %s", strerror(errno));
-            tga_close_file(file, error);
+        if (context.setPosition(colorMapOffset, error) == false) {
             return nullptr;
         }
         
         // Read color map data
         auto colorMapData = new char[colorMapSize];
-        auto read = std::fread(colorMapData, colorMapSize, 1, file);
-        if (read != 1) {
-            tga_error_other(error, "Could not read image data: %s", strerror(errno));
-            tga_close_file(file, error);
+        if (context.read(colorMapData, colorMapSize, error) == false) {
             delete [] colorMapData;
             return nullptr;
         }
@@ -494,10 +540,7 @@ TGAImage* fn_nullable TGAImage::load(const char* fn_nonnull filePath fn_noescape
     {
         // Go to image data section
         auto imageDataOffset = sizeof(TGAHeader) + imageIdLength + colorMapSize;
-        auto result = std::fseek(file, imageDataOffset, SEEK_SET);
-        if (result != 0) {
-            tga_error_other(error, "Could not set the file position: %s", strerror(errno));
-            tga_close_file(file, error);
+        if (context.setPosition(imageDataOffset, error) == false) {
             if (colorMapEntries != nullptr) {
                 delete [] colorMapEntries;
             }
@@ -506,10 +549,7 @@ TGAImage* fn_nullable TGAImage::load(const char* fn_nonnull filePath fn_noescape
         
         // Read raw image data
         rawData = new char[rawDataSize];
-        auto read = std::fread(rawData, rawDataSize, 1, file);
-        if (read != 1) {
-            tga_error_other(error, "Could not read image data: %s", strerror(errno));
-            tga_close_file(file, error);
+        if (context.read(rawData, rawDataSize, error) == false) {
             delete [] rawData;
             if (colorMapEntries != nullptr) {
                 delete [] colorMapEntries;
@@ -543,7 +583,6 @@ TGAImage* fn_nullable TGAImage::load(const char* fn_nonnull filePath fn_noescape
                         auto index = source[x];
                         if (index >= numColorMapEntries) {
                             tga_error_other(error, "Color entry index (%d) out of bounds (%ld)", index, numColorMapEntries);
-                            tga_close_file(file, error);
                             delete [] imageData;
                             delete [] rawData;
                             if (colorMapEntries != nullptr) {
@@ -571,7 +610,6 @@ TGAImage* fn_nullable TGAImage::load(const char* fn_nonnull filePath fn_noescape
                         auto index = source[x];
                         if (index >= numColorMapEntries) {
                             tga_error_other(error, "Color entry index (%d) out of bounds (%ld)", index, numColorMapEntries);
-                            tga_close_file(file, error);
                             delete [] imageData;
                             delete [] rawData;
                             if (colorMapEntries != nullptr) {
@@ -593,7 +631,6 @@ TGAImage* fn_nullable TGAImage::load(const char* fn_nonnull filePath fn_noescape
             }
             else {
                 tga_error_other(error, "Unsupported number of components: %ld", numComponents);
-                tga_close_file(file, error);
                 delete [] imageData;
                 delete [] rawData;
                 if (colorMapEntries != nullptr) {
@@ -604,7 +641,6 @@ TGAImage* fn_nullable TGAImage::load(const char* fn_nonnull filePath fn_noescape
         }
         else {
             tga_error_other(error, "Unsupported pixel depth for uncompressed color-mapped image: %d", header.pixelDepth);
-            tga_close_file(file, error);
             delete [] imageData;
             delete [] rawData;
             if (colorMapEntries != nullptr) {
@@ -623,7 +659,6 @@ TGAImage* fn_nullable TGAImage::load(const char* fn_nonnull filePath fn_noescape
         auto componentSize = pixelWithoutAlphaSize / 3;
         if (pixelWithoutAlphaSize != 24 || componentSize != 8 || (alphaChannelBits != 0 && alphaChannelBits != 8)) {
             tga_error_other(error, "Only 8-bit channel 24-bit RGB or 32-bit RGBA textures are supported. Pixel depth: %d, alpha channel bits: %d", header.pixelDepth, alphaChannelBits);
-            tga_close_file(file, error);
             delete [] rawData;
             if (colorMapEntries != nullptr) {
                 delete [] colorMapEntries;
@@ -675,7 +710,6 @@ TGAImage* fn_nullable TGAImage::load(const char* fn_nonnull filePath fn_noescape
         }
         else {
             tga_error_other(error, "Unsupported number of components: %ld", numComponents);
-            tga_close_file(file, error);
             delete [] imageData;
             delete [] rawData;
             if (colorMapEntries != nullptr) {
@@ -698,7 +732,6 @@ TGAImage* fn_nullable TGAImage::load(const char* fn_nonnull filePath fn_noescape
         //}
         if (header.pixelDepth != 8) {
             tga_error_other(error, "Only 8-bit pixel depth is supported in one-channel images. Pixel depth: %d", header.pixelDepth);
-            tga_close_file(file, error);
             delete [] rawData;
             if (colorMapEntries != nullptr) {
                 delete [] colorMapEntries;
@@ -733,7 +766,6 @@ TGAImage* fn_nullable TGAImage::load(const char* fn_nonnull filePath fn_noescape
     }
     else {
         tga_error_other(error, "Unsupported image type: %d", imageType);
-        tga_close_file(file, error);
         if (rawData != nullptr) {
             delete [] rawData;
         }
@@ -757,9 +789,6 @@ TGAImage* fn_nullable TGAImage::load(const char* fn_nonnull filePath fn_noescape
     if (colorMapEntries != nullptr) {
         delete [] colorMapEntries;
     }
-    
-    // Close file
-    tga_close_file(file, error);
     
     // Return TGA image
     return new TGAImage(header.width, header.height, numComponents, imageData, imageDataSize);
