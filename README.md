@@ -24,4 +24,19 @@ Add the following dependency to your Package.swift:
 .package(url: "https://github.com/EvgenijLutz/FastTGA.git", from: "1.1.1")
 ```
 
+Access the API in `C++`:
+```cpp
+#include <FastTGAC/FastTGAC.hpp>
+```
+
+And `Swift`:
+```Swift
+import FastTGA
+```
+
 And you're good to go!
+
+
+## Swift implementation
+
+As an experiment in porting the codebase entirely to `Swift`, there is also an experimental class called `TGAImage2` that mirrors the logic of `TGAImage`. At the moment, its implementation is at least twice as slow, so you will probably still want to use `TGAImage` (the `C++` implementation) instead.
