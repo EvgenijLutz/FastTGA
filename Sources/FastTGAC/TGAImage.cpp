@@ -48,19 +48,22 @@ static void tga_error_other(TGAError* fn_nullable error fn_noescape, const char*
 
 // MARK: TGAImage
 
-TGAImage::TGAImage(long width, long height, long numComponents, char* fn_nonnull contents, long size):
+TGAImage::TGAImage(long width, long height, long numComponents, std::byte* fn_nonnull contents, bool ownsContents, long size):
 _referenceCounter(1),
 _width(width),
 _height(height),
 _numComponents(numComponents),
 _contents(contents),
+_ownsContents(ownsContents),
 _size(size) {
     //
 }
 
 
 TGAImage::~TGAImage() {
-    delete [] _contents;
+    if (_contents && _ownsContents) {
+        std::free(_contents);
+    }
 }
 
 
@@ -416,6 +419,16 @@ bool TGAImage::isTGA(const TGASource& source fn_noescape, TGAError* fn_nullable 
 }
 
 
+
+bool TGAImage::isTGA(const char* fn_nonnull path fn_noescape, TGAError* fn_nullable error fn_noescape) {
+    return isTGA(TGASource(path), error);
+}
+
+bool TGAImage::isTGA(const void* fn_nonnull buffer fn_noescape, long bufferSize, TGAError* fn_nullable error fn_noescape) {
+    return isTGA(TGASource(buffer, bufferSize), error);
+}
+
+
 TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAError* fn_nullable error fn_noescape) {
     // Open file
     auto context = TGAReaderContext::fromSource(source, error);
@@ -472,9 +485,9 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
         }
         
         // Read color map data
-        auto colorMapData = new char[colorMapSize];
+        auto colorMapData = static_cast<std::byte*>(std::malloc(colorMapSize));
         if (context.read(colorMapData, colorMapSize, error) == false) {
-            delete [] colorMapData;
+            std::free(colorMapData);
             return nullptr;
         }
         
@@ -530,12 +543,12 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
         }
         
         // Clean up
-        delete [] colorMapData;
+        std::free(colorMapData);
     }
     
     
     // Image data
-    char* rawData = nullptr;
+    std::byte* rawData = nullptr;
     long rawDataSize = header.width * header.height * (header.pixelDepth / 8);
     {
         // Go to image data section
@@ -548,9 +561,9 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
         }
         
         // Read raw image data
-        rawData = new char[rawDataSize];
+        rawData = static_cast<std::byte*>(std::malloc(rawDataSize));
         if (context.read(rawData, rawDataSize, error) == false) {
-            delete [] rawData;
+            std::free(rawData);
             if (colorMapEntries != nullptr) {
                 delete [] colorMapEntries;
             }
@@ -560,14 +573,14 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
     
     long numComponents = 0;
     long imageDataSize = 0;
-    char* imageData = nullptr;
+    std::byte* imageData = nullptr;
     auto imageType = header.imageType & 0x7F;
     // Uncompressed, Color-mapped Image
     if (imageType == 1) {
         // Allocate image data
         numComponents = colorMapNumComponents;
         imageDataSize = header.width * header.height * numComponents;
-        imageData = new char[imageDataSize];
+        imageData = static_cast<std::byte*>(std::malloc(imageDataSize));
         
         // Parse raw image data
         if (header.pixelDepth == 8) {
@@ -578,13 +591,13 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
                 for (auto y = 0; y < header.height; y++) {
                     auto sourceIndex = header.height - y - 1;
                     auto source = indices + sourceIndex * header.width;
-                    auto destination = imageData + y * rowSize;
+                    auto destination = reinterpret_cast<uint8_t*>(imageData + y * rowSize);
                     for (auto x = 0; x < header.width; x++) {
                         auto index = source[x];
                         if (index >= numColorMapEntries) {
                             tga_error_other(error, "Color entry index (%d) out of bounds (%ld)", index, numColorMapEntries);
-                            delete [] imageData;
-                            delete [] rawData;
+                            std::free(imageData);
+                            std::free(rawData);
                             if (colorMapEntries != nullptr) {
                                 delete [] colorMapEntries;
                             }
@@ -605,13 +618,13 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
                 for (auto y = 0; y < header.height; y++) {
                     auto sourceIndex = header.height - y - 1;
                     auto source = indices + sourceIndex * header.width;
-                    auto destination = imageData + y * rowSize;
+                    auto destination = reinterpret_cast<uint8_t*>(imageData + y * rowSize);
                     for (auto x = 0; x < header.width; x++) {
                         auto index = source[x];
                         if (index >= numColorMapEntries) {
                             tga_error_other(error, "Color entry index (%d) out of bounds (%ld)", index, numColorMapEntries);
-                            delete [] imageData;
-                            delete [] rawData;
+                            std::free(imageData);
+                            std::free(rawData);
                             if (colorMapEntries != nullptr) {
                                 delete [] colorMapEntries;
                             }
@@ -631,8 +644,8 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
             }
             else {
                 tga_error_other(error, "Unsupported number of components: %ld", numComponents);
-                delete [] imageData;
-                delete [] rawData;
+                std::free(imageData);
+                std::free(rawData);
                 if (colorMapEntries != nullptr) {
                     delete [] colorMapEntries;
                 }
@@ -641,8 +654,8 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
         }
         else {
             tga_error_other(error, "Unsupported pixel depth for uncompressed color-mapped image: %d", header.pixelDepth);
-            delete [] imageData;
-            delete [] rawData;
+            std::free(imageData);
+            std::free(rawData);
             if (colorMapEntries != nullptr) {
                 delete [] colorMapEntries;
             }
@@ -659,7 +672,7 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
         auto componentSize = pixelWithoutAlphaSize / 3;
         if (pixelWithoutAlphaSize != 24 || componentSize != 8 || (alphaChannelBits != 0 && alphaChannelBits != 8)) {
             tga_error_other(error, "Only 8-bit channel 24-bit RGB or 32-bit RGBA textures are supported. Pixel depth: %d, alpha channel bits: %d", header.pixelDepth, alphaChannelBits);
-            delete [] rawData;
+            std::free(rawData);
             if (colorMapEntries != nullptr) {
                 delete [] colorMapEntries;
             }
@@ -672,7 +685,7 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
         
         // Allocate image data
         imageDataSize = header.width * header.height * numComponents;
-        imageData = new char[imageDataSize];
+        imageData = static_cast<std::byte*>(std::malloc(imageDataSize));
         
         // Turn image upside down
         auto rowSize = header.width * numComponents;
@@ -710,21 +723,22 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
         }
         else {
             tga_error_other(error, "Unsupported number of components: %ld", numComponents);
-            delete [] imageData;
-            delete [] rawData;
+            std::free(imageData);
+            std::free(rawData);
             if (colorMapEntries != nullptr) {
                 delete [] colorMapEntries;
             }
             return nullptr;
         }
     }
+    // Uncompressed, Black-and-white Image
     else if (imageType == 3) {
         // Sanity check
         //auto alphaChannelBits = header.imageDescriptor & 0b00001111;
         //if (alphaChannelBits != 0) {
         //    tga_error_other(error, "Alpha channel bits are not supported in one-channel images. Alpha channel bits: %d", alphaChannelBits);
         //    tga_close_file(file, error);
-        //    delete [] rawData;
+        //    std::free(rawData);
         //    if (colorMapEntries != nullptr) {
         //        delete [] colorMapEntries;
         //    }
@@ -732,7 +746,7 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
         //}
         if (header.pixelDepth != 8) {
             tga_error_other(error, "Only 8-bit pixel depth is supported in one-channel images. Pixel depth: %d", header.pixelDepth);
-            delete [] rawData;
+            std::free(rawData);
             if (colorMapEntries != nullptr) {
                 delete [] colorMapEntries;
             }
@@ -743,7 +757,7 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
         
         // Allocate image data
         imageDataSize = header.width * header.height * numComponents;
-        imageData = new char[imageDataSize];
+        imageData = static_cast<std::byte*>(std::malloc(imageDataSize));
         
         // Turn image upside down
         auto rowSize = header.width * numComponents;
@@ -767,7 +781,7 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
     else {
         tga_error_other(error, "Unsupported image type: %d", imageType);
         if (rawData != nullptr) {
-            delete [] rawData;
+            std::free(rawData);
         }
         if (colorMapEntries != nullptr) {
             delete [] colorMapEntries;
@@ -782,7 +796,7 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
     
     // Clean up raw data
     if (rawData != nullptr) {
-        delete [] rawData;
+        std::free(rawData);
     }
     
     // Clean up color map entries
@@ -791,7 +805,23 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
     }
     
     // Return TGA image
-    return new TGAImage(header.width, header.height, numComponents, imageData, imageDataSize);
+    return new TGAImage(header.width, header.height, numComponents, imageData, true, imageDataSize);
+}
+
+
+TGAImage* fn_nullable TGAImage::load(const char* fn_nonnull path fn_noescape, TGAError* fn_nullable error fn_noescape) {
+    return load(TGASource(path), error);
+}
+
+
+TGAImage* fn_nullable TGAImage::load(const void* fn_nonnull buffer fn_noescape, long bufferSize, TGAError* fn_nullable error fn_noescape) {
+    return load(TGASource(buffer, bufferSize), error);
+}
+
+
+void* fn_nonnull TGAImage::Unsafe::transferContentsOwnership(TGAImage* fn_nonnull tga) {
+    tga->_ownsContents = false;
+    return tga->_contents;
 }
 
 

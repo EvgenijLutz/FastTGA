@@ -1,5 +1,27 @@
 # FastTGA
 
-Yes gurl.
+TGA image loader. [TGA File Format specification](http://tfc.duke.free.fr/coding/tga_specs.pdf) is used. Public API is available in C++ and Swift.
 
-[TGA File Format specification](http://tfc.duke.free.fr/coding/tga_specs.pdf) is used.
+An uncompressed `RGB`(+ unused `A`) 4096x4096 image is loaded 0.047s in Debug and 0.023s in Release mode.
+
+Supported types:
+- Uncompressed, Color-mapped Image
+- Uncompressed, True-color Image
+- Uncompressed, Black-and-white Image
+
+To be supported in the future releases:
+- Run-length encoded, Color-mapped Image
+- Run-length encoded, True-color Image
+- Run-length encoded, Black-and-white Image
+- TGA image serialization
+
+
+## Installing FastTGA
+
+Add the following dependency to your Package.swift:
+
+```Swift
+.package(url: "https://github.com/EvgenijLutz/FastTGA.git", from: "1.1.1")
+```
+
+And you're good to go!
