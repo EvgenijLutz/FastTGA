@@ -225,6 +225,54 @@ struct TGAReaderContext {
 };
 
 
+static bool tga_validate_attribute_bits(uint8_t attributeBits) {
+    return attributeBits == 0 // no Alpha data included
+    || attributeBits == 1    // undefined data in the Alpha field, can be ignored
+    || attributeBits == 2    // undefined data in the Alpha field, but should be retained
+    || attributeBits == 4    // useful Alpha channel data is present
+    || attributeBits == 8;   // pre-multiplied Alpha
+}
+
+
+static uint8_t tga_pixel_size(uint8_t pixelDepth) {
+    auto rest = static_cast<uint8_t>(pixelDepth % 8 > 0);
+    return pixelDepth / 8 + rest;
+}
+
+
+static bool tga_inspect_true_color_pixel_depth(uint8_t pixelDepth, uint8_t attributeBits, long* pixelBytes, long* numComponents, bool* useAlpha) {
+    auto hasAlpha = attributeBits == 2 || attributeBits == 4 || attributeBits == 8;
+    switch (pixelDepth) {
+        case 15:
+            *pixelBytes = 2;
+            *numComponents = 3;
+            *useAlpha = false;
+            return true;
+            
+        case 16:
+            *pixelBytes = 2;
+            *numComponents = 4;
+            *useAlpha = hasAlpha;
+            return true;
+            
+        case 24:
+            *pixelBytes = 3;
+            *numComponents = 3;
+            *useAlpha = false;
+            return true;
+            
+        case 32:
+            *pixelBytes = 4;
+            *numComponents = 4;
+            *useAlpha = true;
+            return true;
+            
+        default:
+            return false;
+    }
+}
+
+
 static bool tga_validate(TGAReaderContext& context,
                          TGAError* fn_nullable error fn_noescape,
                          TGAHeader* outHeader,
@@ -366,8 +414,8 @@ static bool tga_validate(TGAReaderContext& context,
         tga_error_other(error, "Image origin is not supported");
         return false;
     }
-    if (header.pixelDepth % 8 != 0) {
-        tga_error_other(error, "Only pixel depths multiple of 8 bits are supported");
+    if ((imageType == 1 || imageType == 9) && header.pixelDepth % 8 != 0) {
+        tga_error_other(error, "Only pixel depths multiple of 8 bits are supported when image is color-mapped");
         return false;
     }
     //if (std::min(header.pixelDepth / 3, 8) != 8) {
@@ -384,12 +432,13 @@ static bool tga_validate(TGAReaderContext& context,
         tga_error_other(error, "Image origin direction is not supported");
         return false;
     }
-    auto alphaChannelBits = header.imageDescriptor & 0b00001111;
-    if (alphaChannelBits != 0 && alphaChannelBits != 8) {
-        tga_error_other(error, "Either no alpha channel or alpha channels with 8 bits are supported");
+    auto attributeBits = header.imageDescriptor & 0b00001111;
+    auto attributeBitsValid = tga_validate_attribute_bits(attributeBits);
+    if (attributeBitsValid == false) {
+        tga_error_other(error, "Unsupported attribute bits: %d", attributeBits);
         return false;
     }
-    if ((imageType == 1 || imageType == 9) && (alphaChannelBits != 0)) {
+    if ((imageType == 1 || imageType == 9) && (attributeBits != 0)) {
         tga_error_other(error, "Aplha channel info in the image descriptior is not supported when image is color-mapped");
         return false;
     }
@@ -549,7 +598,7 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
     
     // Image data
     std::byte* rawData = nullptr;
-    long rawDataSize = header.width * header.height * (header.pixelDepth / 8);
+    long rawDataSize = header.width * header.height * tga_pixel_size(header.pixelDepth);
     {
         // Go to image data section
         auto imageDataOffset = sizeof(TGAHeader) + imageIdLength + colorMapSize;
@@ -666,12 +715,17 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
     else if (imageType == 2) {
         // Determine number of components
 #if 1
-        auto alphaChannelBits = header.imageDescriptor & 0b00001111;
-        numComponents = alphaChannelBits ? 4 : 3;
-        auto pixelWithoutAlphaSize = header.pixelDepth - alphaChannelBits;
-        auto componentSize = pixelWithoutAlphaSize / 3;
-        if (pixelWithoutAlphaSize != 24 || componentSize != 8 || (alphaChannelBits != 0 && alphaChannelBits != 8)) {
-            tga_error_other(error, "Only 8-bit channel 24-bit RGB or 32-bit RGBA textures are supported. Pixel depth: %d, alpha channel bits: %d", header.pixelDepth, alphaChannelBits);
+        auto attributeBits = header.imageDescriptor & 0b00001111;
+        auto attributeBitsValid = tga_validate_attribute_bits(attributeBits);
+        
+        long pixelBytes = 0;
+        bool hasAlpha = false;
+        auto pixelDepthValid = tga_inspect_true_color_pixel_depth(header.pixelDepth, attributeBits, &pixelBytes, &numComponents, &hasAlpha);
+        uint8_t alphaMask = hasAlpha ? 0xFF : 0x00;
+        uint8_t defaultAlpha = hasAlpha ? 0x00 : 0xFF;
+        
+        if (attributeBitsValid == false || pixelDepthValid == false) {
+            tga_error_other(error, "Only 8-bit channel 24-bit RGB or 32-bit RGBA textures are supported. Pixel depth: %d, alpha channel bits: %d", header.pixelDepth, attributeBits);
             std::free(rawData);
             if (colorMapEntries != nullptr) {
                 delete [] colorMapEntries;
@@ -687,37 +741,80 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
         imageDataSize = header.width * header.height * numComponents;
         imageData = static_cast<std::byte*>(std::malloc(imageDataSize));
         
+        struct helper {
+            static std::byte expand5To8(uint16_t v) {
+                auto x = static_cast<std::byte>(v);
+                return (x << 3) | (x >> 2);
+            }
+        };
+        
         // Turn image upside down
-        auto rowSize = header.width * numComponents;
+        auto sourceRowSize = header.width * pixelBytes;
+        auto destinationRowSize = header.width * numComponents;
         if (numComponents == 3) {
-            for (auto y = 0; y < header.height; y++) {
-                auto sourceIndex = header.height - y - 1;
-                auto source = rawData + sourceIndex * rowSize;
-                auto destination = imageData + y * rowSize;
-                for (auto x = 0; x < header.width; x++) {
-                    destination[0] = source[2];
-                    destination[1] = source[1];
-                    destination[2] = source[0];
-                    
-                    source += 3;
-                    destination += 3;
+            if (pixelBytes == 2) {
+                for (auto y = 0; y < header.height; y++) {
+                    auto sourceIndex = header.height - y - 1;
+                    auto source = reinterpret_cast<uint16_t*>(rawData + sourceIndex * sourceRowSize);
+                    auto destination = imageData + y * destinationRowSize;
+                    for (auto x = 0; x < header.width; x++) {
+                        auto pixel = source[x];
+                        destination[0] = helper::expand5To8((pixel >> 10) & 0x1F);
+                        destination[1] = helper::expand5To8((pixel >>  5) & 0x1F);
+                        destination[2] = helper::expand5To8((pixel >>  0) & 0x1F);
+                        
+                        destination += 3;
+                    }
+                }
+            }
+            else if (pixelBytes == 3) {
+                for (auto y = 0; y < header.height; y++) {
+                    auto sourceIndex = header.height - y - 1;
+                    auto source = rawData + sourceIndex * sourceRowSize;
+                    auto destination = imageData + y * destinationRowSize;
+                    for (auto x = 0; x < header.width; x++) {
+                        destination[0] = source[2];
+                        destination[1] = source[1];
+                        destination[2] = source[0];
+                        
+                        source += 3;
+                        destination += 3;
+                    }
                 }
             }
         }
         else if (numComponents == 4) {
-            for (auto y = 0; y < header.height; y++) {
-                auto sourceIndex = header.height - y - 1;
-                auto source = rawData + sourceIndex * rowSize;
-                auto destination = imageData + y * rowSize;
-                
-                for (auto x = 0; x < header.width; x++) {
-                    destination[0] = source[2];
-                    destination[1] = source[1];
-                    destination[2] = source[0];
-                    destination[3] = source[3];
+            if (pixelBytes == 2) {
+                for (auto y = 0; y < header.height; y++) {
+                    auto sourceIndex = header.height - y - 1;
+                    auto source = reinterpret_cast<uint16_t*>(rawData + sourceIndex * sourceRowSize);
+                    auto destination = imageData + y * destinationRowSize;
+                    for (auto x = 0; x < header.width; x++) {
+                        auto pixel = source[x];
+                        destination[0] = helper::expand5To8((pixel >> 10) & 0x1F);
+                        destination[1] = helper::expand5To8((pixel >>  5) & 0x1F);
+                        destination[2] = helper::expand5To8((pixel >>  0) & 0x1F);
+                        destination[3] = static_cast<std::byte>((((pixel >> 15) * 255) & alphaMask) + defaultAlpha);
+                        
+                        destination += 4;
+                    }
+                }
+            }
+            else if (pixelBytes == 4) {
+                for (auto y = 0; y < header.height; y++) {
+                    auto sourceIndex = header.height - y - 1;
+                    auto source = rawData + sourceIndex * sourceRowSize;
+                    auto destination = imageData + y * destinationRowSize;
                     
-                    source += 4;
-                    destination += 4;
+                    for (auto x = 0; x < header.width; x++) {
+                        destination[0] = source[2];
+                        destination[1] = source[1];
+                        destination[2] = source[0];
+                        destination[3] = static_cast<std::byte>((static_cast<uint8_t>(source[3]) & alphaMask) + defaultAlpha);
+                        
+                        source += 4;
+                        destination += 4;
+                    }
                 }
             }
         }
@@ -734,9 +831,9 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
     // Uncompressed, Black-and-white Image
     else if (imageType == 3) {
         // Sanity check
-        //auto alphaChannelBits = header.imageDescriptor & 0b00001111;
-        //if (alphaChannelBits != 0) {
-        //    tga_error_other(error, "Alpha channel bits are not supported in one-channel images. Alpha channel bits: %d", alphaChannelBits);
+        //auto attributeBits = header.imageDescriptor & 0b00001111;
+        //if (attributeBits != 0) {
+        //    tga_error_other(error, "Alpha channel bits are not supported in one-channel images. Alpha channel bits: %d", attributeBits);
         //    tga_close_file(file, error);
         //    std::free(rawData);
         //    if (colorMapEntries != nullptr) {
