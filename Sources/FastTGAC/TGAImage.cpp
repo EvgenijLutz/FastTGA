@@ -5,7 +5,18 @@
 //  Created by Evgenij Lutz on 26.01.26.
 //
 
+#define _LIBCPP_REMOVE_TRANSITIVE_INCLUDES
 #include <FastTGAC/TGAImage.hpp>
+#include <cstdio>
+#include <cstdarg>
+#include <cstdlib>
+
+#if __APPLE__
+#  include <simd/simd.h>
+#  define USE_SIMD 1
+#else
+#  define USE_SIMD 0
+#endif
 
 
 // MARK: Error
@@ -15,7 +26,7 @@ static void tga_error_reset(TGAError* fn_nullable error fn_noescape) {
         return;
     }
     
-    memset(error, 0, sizeof(TGAError));
+    std::memset(error, 0, sizeof(TGAError));
 }
 
 //static void tga_error_notImplemented(TGAError* fn_nullable error fn_noescape) {
@@ -241,8 +252,15 @@ static uint8_t tga_pixel_size(uint8_t pixelDepth) {
 
 
 static bool tga_inspect_true_color_pixel_depth(uint8_t pixelDepth, uint8_t attributeBits, long* pixelBytes, long* numComponents, bool* useAlpha) {
+    // Although the value 2 means unused alpha, we still present it
     auto hasAlpha = attributeBits == 2 || attributeBits == 4 || attributeBits == 8;
     switch (pixelDepth) {
+        case 8:
+            *pixelBytes = 1;
+            *numComponents = 4;
+            *useAlpha = hasAlpha;
+            return true;
+            
         case 15:
             *pixelBytes = 2;
             *numComponents = 3;
@@ -478,6 +496,150 @@ bool TGAImage::isTGA(const void* fn_nonnull buffer fn_noescape, long bufferSize,
 }
 
 
+struct helper {
+    static inline std::byte expand5To8(uint16_t v) {
+        auto x = static_cast<std::byte>(v);
+        return (x << 3) | (x >> 2);
+    }
+    
+    
+    static inline float fromLinearToSRGB(float linear) {
+        if (linear < 0.0031308f) {
+            return linear * 12.92f;
+        }
+        
+        return std::pow(linear, 1.0f / 2.4f) * 1.055f - 0.055f;
+    }
+
+
+    static inline float fromSRGBToLinear(float sRGB) {
+        if (sRGB <= 0.04045f) {
+            return sRGB / 12.92f;
+        }
+        
+        return std::pow((sRGB + 0.055f) / 1.055f, 2.4f);
+    }
+    
+    
+    static inline float ft(uint8_t value) {
+        return static_cast<float>(value) / 255.0f;
+    }
+    
+    
+    static inline uint8_t ut(float value) {
+        if (value < 0.0f) value = 0.0f;
+        if (value > 1.0f) value = 1.0f;
+        return static_cast<uint8_t>(roundf(value * 255.0f));
+    }
+    
+    
+    static inline float _clamp(float value, float min, float max) {
+        if (value < min) {
+            return min;
+        }
+        
+        if (value > max) {
+            return max;
+        }
+        
+        return value;
+    }
+    
+    
+    static inline void unmultiply(std::byte* dst) {
+#if 1
+        auto bytes = reinterpret_cast<uint8_t*>(dst);
+        auto alpha = bytes[3];
+        if (alpha > 0 && alpha < 255) [[ likely ]] {
+# if 0
+            // sRGB -> linear -> unmultiply -> sRGB
+            auto fa = ft(alpha);
+            bytes[0] = ut(fromLinearToSRGB(fromSRGBToLinear(ft(bytes[0])) / fa));
+            bytes[1] = ut(fromLinearToSRGB(fromSRGBToLinear(ft(bytes[1])) / fa));
+            bytes[2] = ut(fromLinearToSRGB(fromSRGBToLinear(ft(bytes[2])) / fa));
+# else
+            bytes[0] = _clamp(bytes[0] * 255.0f / alpha, 0.0f, 255.0f);
+            bytes[1] = _clamp(bytes[1] * 255.0f / alpha, 0.0f, 255.0f);
+            bytes[2] = _clamp(bytes[2] * 255.0f / alpha, 0.0f, 255.0f);
+#endif
+        }
+# if 0
+        else if (alpha == 0) {
+            bytes[0] = 0;
+            bytes[1] = 0;
+            bytes[2] = 0;
+        }
+# endif
+#endif
+    }
+    
+    
+    static inline void readB8G8R8(std::byte* dst, const std::byte* src) {
+        dst[0] = src[2];
+        dst[1] = src[1];
+        dst[2] = src[0];
+    }
+    
+    static inline void readB8G8R8A8(std::byte* dst, const std::byte* src, uint8_t alphaMask, uint8_t defaultAlpha) {
+        readB8G8R8(dst, src);
+        dst[3] = static_cast<std::byte>((static_cast<uint8_t>(src[3]) & alphaMask) + defaultAlpha);
+    }
+    
+    static inline void readB8G8R8A8_premul(std::byte* dst, const std::byte* src) {
+        readB8G8R8A8(dst, src, 0xFF, 0x00);
+        unmultiply(dst);
+    }
+    
+    
+    union short_pixel final {
+        uint16_t shortValue;
+        std::byte bytes[2];
+        
+        short_pixel(): shortValue(0) { }
+        short_pixel(const std::byte* src) {
+            bytes[0] = src[0];
+            bytes[1] = src[1];
+        }
+    };
+    
+    static inline void readB5G5R5(std::byte* dst, uint16_t src) {
+#if 0 //USE_SIMD
+        //constexpr simd_ushort3 s = { 10, 5, 0 };
+        //auto vec = simd_make_short3(src, src, src) >> s;
+        auto vec = simd_make_short3(src >> 10, src >> 5, src);
+        vec = vec & 0x1F;
+        vec = (vec << 3) | (vec >> 2);
+        dst[0] = static_cast<std::byte>(vec.x);
+        dst[1] = static_cast<std::byte>(vec.y);
+        dst[2] = static_cast<std::byte>(vec.z);
+#else
+        dst[0] = expand5To8((src >> 10) & 0x1F);
+        dst[1] = expand5To8((src >>  5) & 0x1F);
+        dst[2] = expand5To8((src >>  0) & 0x1F);
+#endif
+    }
+    
+    static inline void readB5G5R5(std::byte* dst, const std::byte* src) {
+        readB5G5R5(dst, short_pixel(src).shortValue);
+    }
+    
+    
+    static inline void readB5G5R5A1(std::byte* dst, uint16_t src, uint8_t alphaMask, uint8_t defaultAlpha) {
+        readB5G5R5(dst, src);
+        dst[3] = static_cast<std::byte>((((src >> 15) * 255) & alphaMask) + defaultAlpha);
+    }
+    
+    static inline void readB5G5R5A1(std::byte* dst, const std::byte* src, uint8_t alphaMask, uint8_t defaultAlpha) {
+        readB5G5R5A1(dst, short_pixel(src).shortValue, alphaMask, defaultAlpha);
+    }
+    
+    static inline void readB5G5R5A1_premul(std::byte* dst, const std::byte* src) {
+        readB5G5R5A1(dst, src, 0xFF, 0x00);
+        unmultiply(dst);
+    }
+};
+
+
 TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAError* fn_nullable error fn_noescape) {
     // Open file
     auto context = TGAReaderContext::fromSource(source, error);
@@ -519,12 +681,18 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
     auto numColorMapEntries = static_cast<long>(header.colorMapLength);
     auto colorMapEntrySize = static_cast<long>(header.colorMapEntrySize);
     auto colorMapSize = numColorMapEntries * (colorMapEntrySize / 8);
-    struct ColorMapEntry {
-        uint8_t r;
-        uint8_t g;
-        uint8_t b;
-        uint8_t a;
+    union ColorMapEntry final {
+        struct {
+            uint8_t r;
+            uint8_t g;
+            uint8_t b;
+            uint8_t a;
+        };
+        
+        uint8_t components[4];
+        std::byte bytes[4];
     };
+    static_assert(sizeof(ColorMapEntry) == 4, "Size of ColorMapEntry should be 4");
     ColorMapEntry* colorMapEntries = nullptr;
     if ((header.colorMapType & 0x7F) == 1) {
         // Go to color map data section
@@ -544,46 +712,40 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
         colorMapEntries = new ColorMapEntry[numColorMapEntries];
         if (colorMapEntrySize == 32) {
             colorMapNumComponents = 4;
-            auto uint8Entries = reinterpret_cast<uint8_t*>(colorMapData);
+            auto byteEntries = reinterpret_cast<std::byte*>(colorMapData);
             for (auto i = 0; i < numColorMapEntries; i++) {
-                colorMapEntries[i] = {
-                    .r = uint8Entries[2],
-                    .g = uint8Entries[1],
-                    .b = uint8Entries[0],
-                    .a = uint8Entries[3]
-                };
-                uint8Entries += 4;
+                helper::readB8G8R8A8(colorMapEntries[i].bytes, byteEntries, 0xFF, 0x00);
+                byteEntries += 4;
             }
         }
         else if (colorMapEntrySize == 24) {
             colorMapNumComponents = 3;
-            auto uint8Entries = reinterpret_cast<uint8_t*>(colorMapData);
+            auto byteEntries = reinterpret_cast<std::byte*>(colorMapData);
             for (auto i = 0; i < numColorMapEntries; i++) {
-                colorMapEntries[i] = {
-                    .r = uint8Entries[2],
-                    .g = uint8Entries[1],
-                    .b = uint8Entries[0],
-                    .a = 0
-                };
-                uint8Entries += 3;
+                helper::readB8G8R8(colorMapEntries[i].bytes, byteEntries);
+                byteEntries += 3;
             }
         }
         else if (colorMapEntrySize == 16) {
             colorMapNumComponents = 3;
             auto uint16Entries = reinterpret_cast<uint16_t*>(colorMapData);
             for (auto i = 0; i < numColorMapEntries; i++) {
-                auto entry = uint16Entries[0];
-                // TODO: Normalize values individually?
-                auto r = (entry >> 10) & 0x1F;
-                auto g = (entry >>  5) & 0x1F;
-                auto b = (entry >>  0) & 0x1F;
+                //helper::readB5G5R5A1(colorMapEntries[i].bytes, uint16Entries[0], 0xFF, 0x00);
+                helper::readB5G5R5(colorMapEntries[i].bytes, uint16Entries[0]);
                 
-                colorMapEntries[i] = {
-                    .r = static_cast<uint8_t>(r),
-                    .g = static_cast<uint8_t>(g),
-                    .b = static_cast<uint8_t>(b),
-                    .a = 0
-                };
+                //auto entry = uint16Entries[0];
+                // // TODO: Normalize values individually?
+                //auto r = (entry >> 10) & 0x1F;
+                //auto g = (entry >>  5) & 0x1F;
+                //auto b = (entry >>  0) & 0x1F;
+                //
+                //colorMapEntries[i] = {
+                //    .r = static_cast<uint8_t>(r),
+                //    .g = static_cast<uint8_t>(g),
+                //    .b = static_cast<uint8_t>(b),
+                //    .a = 0
+                //};
+                
                 uint16Entries += 1;
             }
         }
@@ -643,7 +805,7 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
                     auto destination = reinterpret_cast<uint8_t*>(imageData + y * rowSize);
                     for (auto x = 0; x < header.width; x++) {
                         auto index = source[x];
-                        if (index >= numColorMapEntries) {
+                        if (index >= numColorMapEntries) [[ unlikely ]] {
                             tga_error_other(error, "Color entry index (%d) out of bounds (%ld)", index, numColorMapEntries);
                             std::free(imageData);
                             std::free(rawData);
@@ -670,7 +832,7 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
                     auto destination = reinterpret_cast<uint8_t*>(imageData + y * rowSize);
                     for (auto x = 0; x < header.width; x++) {
                         auto index = source[x];
-                        if (index >= numColorMapEntries) {
+                        if (index >= numColorMapEntries) [[ unlikely ]] {
                             tga_error_other(error, "Color entry index (%d) out of bounds (%ld)", index, numColorMapEntries);
                             std::free(imageData);
                             std::free(rawData);
@@ -714,12 +876,12 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
     // Uncompressed, True-color Image
     else if (imageType == 2) {
         // Determine number of components
-#if 1
         auto attributeBits = header.imageDescriptor & 0b00001111;
         auto attributeBitsValid = tga_validate_attribute_bits(attributeBits);
         
         long pixelBytes = 0;
         bool hasAlpha = false;
+        bool premultipliedAlpha = attributeBits == 8;
         auto pixelDepthValid = tga_inspect_true_color_pixel_depth(header.pixelDepth, attributeBits, &pixelBytes, &numComponents, &hasAlpha);
         uint8_t alphaMask = hasAlpha ? 0xFF : 0x00;
         uint8_t defaultAlpha = hasAlpha ? 0x00 : 0xFF;
@@ -732,89 +894,50 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
             }
             return nullptr;
         }
-#else
-        // Actually wrong formula
-        numComponents = header.pixelDepth / 8;
-#endif
         
         // Allocate image data
         imageDataSize = header.width * header.height * numComponents;
         imageData = static_cast<std::byte*>(std::malloc(imageDataSize));
         
-        struct helper {
-            static std::byte expand5To8(uint16_t v) {
-                auto x = static_cast<std::byte>(v);
-                return (x << 3) | (x >> 2);
-            }
-        };
-        
         // Turn image upside down
         auto sourceRowSize = header.width * pixelBytes;
         auto destinationRowSize = header.width * numComponents;
+        
+#define pixel_loop(_dst_inc, _src_inc, _main_body_) \
+for (auto y = 0; y < header.height; y++) { \
+    auto sourceIndex = header.height - y - 1; \
+    auto source = rawData + sourceIndex * sourceRowSize; \
+    auto destination = imageData + y * destinationRowSize; \
+    for (auto x = 0; x < header.width; x++) { \
+        _main_body_ \
+        source += (_src_inc); \
+        destination += (_dst_inc); \
+    } \
+}
+        
         if (numComponents == 3) {
             if (pixelBytes == 2) {
-                for (auto y = 0; y < header.height; y++) {
-                    auto sourceIndex = header.height - y - 1;
-                    auto source = reinterpret_cast<uint16_t*>(rawData + sourceIndex * sourceRowSize);
-                    auto destination = imageData + y * destinationRowSize;
-                    for (auto x = 0; x < header.width; x++) {
-                        auto pixel = source[x];
-                        destination[0] = helper::expand5To8((pixel >> 10) & 0x1F);
-                        destination[1] = helper::expand5To8((pixel >>  5) & 0x1F);
-                        destination[2] = helper::expand5To8((pixel >>  0) & 0x1F);
-                        
-                        destination += 3;
-                    }
-                }
+                pixel_loop(3, 2, { helper::readB5G5R5(destination, source); })
             }
             else if (pixelBytes == 3) {
-                for (auto y = 0; y < header.height; y++) {
-                    auto sourceIndex = header.height - y - 1;
-                    auto source = rawData + sourceIndex * sourceRowSize;
-                    auto destination = imageData + y * destinationRowSize;
-                    for (auto x = 0; x < header.width; x++) {
-                        destination[0] = source[2];
-                        destination[1] = source[1];
-                        destination[2] = source[0];
-                        
-                        source += 3;
-                        destination += 3;
-                    }
-                }
+                pixel_loop(3, 3, { helper::readB8G8R8(destination, source); })
             }
         }
         else if (numComponents == 4) {
             if (pixelBytes == 2) {
-                for (auto y = 0; y < header.height; y++) {
-                    auto sourceIndex = header.height - y - 1;
-                    auto source = reinterpret_cast<uint16_t*>(rawData + sourceIndex * sourceRowSize);
-                    auto destination = imageData + y * destinationRowSize;
-                    for (auto x = 0; x < header.width; x++) {
-                        auto pixel = source[x];
-                        destination[0] = helper::expand5To8((pixel >> 10) & 0x1F);
-                        destination[1] = helper::expand5To8((pixel >>  5) & 0x1F);
-                        destination[2] = helper::expand5To8((pixel >>  0) & 0x1F);
-                        destination[3] = static_cast<std::byte>((((pixel >> 15) * 255) & alphaMask) + defaultAlpha);
-                        
-                        destination += 4;
-                    }
+                if (premultipliedAlpha) {
+                    pixel_loop(4, 2, { helper::readB5G5R5A1_premul(destination, source); })
+                }
+                else {
+                    pixel_loop(4, 2, { helper::readB5G5R5A1(destination, source, alphaMask, defaultAlpha); })
                 }
             }
             else if (pixelBytes == 4) {
-                for (auto y = 0; y < header.height; y++) {
-                    auto sourceIndex = header.height - y - 1;
-                    auto source = rawData + sourceIndex * sourceRowSize;
-                    auto destination = imageData + y * destinationRowSize;
-                    
-                    for (auto x = 0; x < header.width; x++) {
-                        destination[0] = source[2];
-                        destination[1] = source[1];
-                        destination[2] = source[0];
-                        destination[3] = static_cast<std::byte>((static_cast<uint8_t>(source[3]) & alphaMask) + defaultAlpha);
-                        
-                        source += 4;
-                        destination += 4;
-                    }
+                if (premultipliedAlpha) {
+                    pixel_loop(4, 4, { helper::readB8G8R8A8_premul(destination, source); })
+                }
+                else {
+                    pixel_loop(4, 4, { helper::readB8G8R8A8(destination, source, alphaMask, defaultAlpha); })
                 }
             }
         }
@@ -864,7 +987,7 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
             auto destination = imageData + y * rowSize;
             
 #if 1
-            memcpy(destination, source, rowSize);
+            std::memcpy(destination, source, rowSize);
 #else
             for (auto x = 0; x < header.width; x++) {
                 destination[0] = source[0];

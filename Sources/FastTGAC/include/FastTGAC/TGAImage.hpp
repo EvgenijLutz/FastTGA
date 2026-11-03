@@ -8,6 +8,7 @@
 #pragma once
 
 #include <FastTGAC/Common.hpp>
+#include <atomic>
 
 
 enum class TGAErrorCode: int {
