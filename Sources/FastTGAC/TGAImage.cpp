@@ -59,7 +59,7 @@ static void tga_error_other(TGAError* fn_nullable error fn_noescape, const char*
 
 // MARK: TGAImage
 
-TGAImage::TGAImage(long width, long height, long numComponents, std::byte* fn_nonnull contents, bool ownsContents, long size):
+TGAImage::TGAImage(long width, long height, long numComponents, uint8_t* fn_nonnull contents, bool ownsContents, long size):
 _referenceCounter(1),
 _width(width),
 _height(height),
@@ -123,7 +123,7 @@ static FILE* fn_nullable tga_open_file(const char* fn_nonnull filePath fn_noesca
 }
 
 
-static bool tga_close_file(FILE* fn_nullable file, TGAError* fn_nullable error fn_noescape) {
+static bool tga_close_file(FILE* fn_nullable file, [[maybe_unused]] TGAError* fn_nullable error fn_noescape) {
     if (file == nullptr) {
         return true;
     }
@@ -497,8 +497,8 @@ bool TGAImage::isTGA(const void* fn_nonnull buffer fn_noescape, long bufferSize,
 
 
 struct helper {
-    static inline std::byte expand5To8(uint16_t v) {
-        auto x = static_cast<std::byte>(v);
+    static inline uint8_t expand5To8(uint16_t v) {
+        auto x = static_cast<uint8_t>(v);
         return (x << 3) | (x >> 2);
     }
     
@@ -546,9 +546,9 @@ struct helper {
     }
     
     
-    static inline void unmultiply(std::byte* dst) {
+    static inline void unmultiply(uint8_t* dst) {
 #if 1
-        auto bytes = reinterpret_cast<uint8_t*>(dst);
+        auto bytes = static_cast<uint8_t*>(dst);
         auto alpha = bytes[3];
         if (alpha > 0 && alpha < 255) [[ likely ]] {
 # if 0
@@ -574,18 +574,18 @@ struct helper {
     }
     
     
-    static inline void readB8G8R8(std::byte* dst, const std::byte* src) {
+    static inline void readB8G8R8(uint8_t* dst, const uint8_t* src) {
         dst[0] = src[2];
         dst[1] = src[1];
         dst[2] = src[0];
     }
     
-    static inline void readB8G8R8A8(std::byte* dst, const std::byte* src, uint8_t alphaMask, uint8_t defaultAlpha) {
+    static inline void readB8G8R8A8(uint8_t* dst, const uint8_t* src, uint8_t alphaMask, uint8_t defaultAlpha) {
         readB8G8R8(dst, src);
-        dst[3] = static_cast<std::byte>((static_cast<uint8_t>(src[3]) & alphaMask) + defaultAlpha);
+        dst[3] = static_cast<uint8_t>((static_cast<uint8_t>(src[3]) & alphaMask) + defaultAlpha);
     }
     
-    static inline void readB8G8R8A8_premul(std::byte* dst, const std::byte* src) {
+    static inline void readB8G8R8A8_premul(uint8_t* dst, const uint8_t* src) {
         readB8G8R8A8(dst, src, 0xFF, 0x00);
         unmultiply(dst);
     }
@@ -593,25 +593,25 @@ struct helper {
     
     union short_pixel final {
         uint16_t shortValue;
-        std::byte bytes[2];
+        uint8_t bytes[2];
         
         short_pixel(): shortValue(0) { }
-        short_pixel(const std::byte* src) {
+        short_pixel(const uint8_t* src) {
             bytes[0] = src[0];
             bytes[1] = src[1];
         }
     };
     
-    static inline void readB5G5R5(std::byte* dst, uint16_t src) {
+    static inline void readB5G5R5(uint8_t* dst, uint16_t src) {
 #if 0 //USE_SIMD
         //constexpr simd_ushort3 s = { 10, 5, 0 };
         //auto vec = simd_make_short3(src, src, src) >> s;
         auto vec = simd_make_short3(src >> 10, src >> 5, src);
         vec = vec & 0x1F;
         vec = (vec << 3) | (vec >> 2);
-        dst[0] = static_cast<std::byte>(vec.x);
-        dst[1] = static_cast<std::byte>(vec.y);
-        dst[2] = static_cast<std::byte>(vec.z);
+        dst[0] = static_cast<uint8_t>(vec.x);
+        dst[1] = static_cast<uint8_t>(vec.y);
+        dst[2] = static_cast<uint8_t>(vec.z);
 #else
         dst[0] = expand5To8((src >> 10) & 0x1F);
         dst[1] = expand5To8((src >>  5) & 0x1F);
@@ -619,28 +619,28 @@ struct helper {
 #endif
     }
     
-    static inline void readB5G5R5(std::byte* dst, const std::byte* src) {
+    static inline void readB5G5R5(uint8_t* dst, const uint8_t* src) {
         readB5G5R5(dst, short_pixel(src).shortValue);
     }
     
     
-    static inline void readB5G5R5A1(std::byte* dst, uint16_t src, uint8_t alphaMask, uint8_t defaultAlpha) {
+    static inline void readB5G5R5A1(uint8_t* dst, uint16_t src, uint8_t alphaMask, uint8_t defaultAlpha) {
         readB5G5R5(dst, src);
-        dst[3] = static_cast<std::byte>((((src >> 15) * 255) & alphaMask) + defaultAlpha);
+        dst[3] = static_cast<uint8_t>((((src >> 15) * 255) & alphaMask) + defaultAlpha);
     }
     
-    static inline void readB5G5R5A1(std::byte* dst, const std::byte* src, uint8_t alphaMask, uint8_t defaultAlpha) {
+    static inline void readB5G5R5A1(uint8_t* dst, const uint8_t* src, uint8_t alphaMask, uint8_t defaultAlpha) {
         readB5G5R5A1(dst, short_pixel(src).shortValue, alphaMask, defaultAlpha);
     }
     
-    static inline void readB5G5R5A1_premul(std::byte* dst, const std::byte* src) {
+    static inline void readB5G5R5A1_premul(uint8_t* dst, const uint8_t* src) {
         readB5G5R5A1(dst, src, 0xFF, 0x00);
         unmultiply(dst);
     }
 };
 
 
-TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAError* fn_nullable error fn_noescape) {
+TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAError* fn_nullable error fn_noescape) SWIFT_RETURNS_RETAINED {
     // Open file
     auto context = TGAReaderContext::fromSource(source, error);
     if (context.file == nullptr) {
@@ -690,7 +690,7 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
         };
         
         uint8_t components[4];
-        std::byte bytes[4];
+        uint8_t bytes[4];
     };
     static_assert(sizeof(ColorMapEntry) == 4, "Size of ColorMapEntry should be 4");
     ColorMapEntry* colorMapEntries = nullptr;
@@ -702,7 +702,7 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
         }
         
         // Read color map data
-        auto colorMapData = static_cast<std::byte*>(std::malloc(colorMapSize));
+        auto colorMapData = static_cast<uint8_t*>(std::malloc(colorMapSize));
         if (context.read(colorMapData, colorMapSize, error) == false) {
             std::free(colorMapData);
             return nullptr;
@@ -712,7 +712,7 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
         colorMapEntries = new ColorMapEntry[numColorMapEntries];
         if (colorMapEntrySize == 32) {
             colorMapNumComponents = 4;
-            auto byteEntries = reinterpret_cast<std::byte*>(colorMapData);
+            auto byteEntries = static_cast<uint8_t*>(colorMapData);
             for (auto i = 0; i < numColorMapEntries; i++) {
                 helper::readB8G8R8A8(colorMapEntries[i].bytes, byteEntries, 0xFF, 0x00);
                 byteEntries += 4;
@@ -720,7 +720,7 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
         }
         else if (colorMapEntrySize == 24) {
             colorMapNumComponents = 3;
-            auto byteEntries = reinterpret_cast<std::byte*>(colorMapData);
+            auto byteEntries = static_cast<uint8_t*>(colorMapData);
             for (auto i = 0; i < numColorMapEntries; i++) {
                 helper::readB8G8R8(colorMapEntries[i].bytes, byteEntries);
                 byteEntries += 3;
@@ -759,7 +759,7 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
     
     
     // Image data
-    std::byte* rawData = nullptr;
+    uint8_t* rawData = nullptr;
     long rawDataSize = header.width * header.height * tga_pixel_size(header.pixelDepth);
     {
         // Go to image data section
@@ -772,7 +772,7 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
         }
         
         // Read raw image data
-        rawData = static_cast<std::byte*>(std::malloc(rawDataSize));
+        rawData = static_cast<uint8_t*>(std::malloc(rawDataSize));
         if (context.read(rawData, rawDataSize, error) == false) {
             std::free(rawData);
             if (colorMapEntries != nullptr) {
@@ -784,25 +784,25 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
     
     long numComponents = 0;
     long imageDataSize = 0;
-    std::byte* imageData = nullptr;
+    uint8_t* imageData = nullptr;
     auto imageType = header.imageType & 0x7F;
     // Uncompressed, Color-mapped Image
     if (imageType == 1) {
         // Allocate image data
         numComponents = colorMapNumComponents;
         imageDataSize = header.width * header.height * numComponents;
-        imageData = static_cast<std::byte*>(std::malloc(imageDataSize));
+        imageData = static_cast<uint8_t*>(std::malloc(imageDataSize));
         
         // Parse raw image data
         if (header.pixelDepth == 8) {
             auto rowSize = header.width * numComponents;
-            auto indices = reinterpret_cast<uint8_t*>(rawData);
+            auto indices = static_cast<uint8_t*>(rawData);
             
             if (numComponents == 3) {
                 for (auto y = 0; y < header.height; y++) {
                     auto sourceIndex = header.height - y - 1;
                     auto source = indices + sourceIndex * header.width;
-                    auto destination = reinterpret_cast<uint8_t*>(imageData + y * rowSize);
+                    auto destination = static_cast<uint8_t*>(imageData + y * rowSize);
                     for (auto x = 0; x < header.width; x++) {
                         auto index = source[x];
                         if (index >= numColorMapEntries) [[ unlikely ]] {
@@ -829,7 +829,7 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
                 for (auto y = 0; y < header.height; y++) {
                     auto sourceIndex = header.height - y - 1;
                     auto source = indices + sourceIndex * header.width;
-                    auto destination = reinterpret_cast<uint8_t*>(imageData + y * rowSize);
+                    auto destination = static_cast<uint8_t*>(imageData + y * rowSize);
                     for (auto x = 0; x < header.width; x++) {
                         auto index = source[x];
                         if (index >= numColorMapEntries) [[ unlikely ]] {
@@ -897,7 +897,7 @@ TGAImage* fn_nullable TGAImage::load(const TGASource& source fn_noescape, TGAErr
         
         // Allocate image data
         imageDataSize = header.width * header.height * numComponents;
-        imageData = static_cast<std::byte*>(std::malloc(imageDataSize));
+        imageData = static_cast<uint8_t*>(std::malloc(imageDataSize));
         
         // Turn image upside down
         auto sourceRowSize = header.width * pixelBytes;
@@ -977,7 +977,7 @@ for (auto y = 0; y < header.height; y++) { \
         
         // Allocate image data
         imageDataSize = header.width * header.height * numComponents;
-        imageData = static_cast<std::byte*>(std::malloc(imageDataSize));
+        imageData = static_cast<uint8_t*>(std::malloc(imageDataSize));
         
         // Turn image upside down
         auto rowSize = header.width * numComponents;
@@ -1029,17 +1029,17 @@ for (auto y = 0; y < header.height; y++) { \
 }
 
 
-TGAImage* fn_nullable TGAImage::load(const char* fn_nonnull path fn_noescape, TGAError* fn_nullable error fn_noescape) {
+TGAImage* fn_nullable TGAImage::load(const char* fn_nonnull path fn_noescape, TGAError* fn_nullable error fn_noescape) SWIFT_RETURNS_RETAINED {
     return load(TGASource(path), error);
 }
 
 
-TGAImage* fn_nullable TGAImage::load(const void* fn_nonnull buffer fn_noescape, long bufferSize, TGAError* fn_nullable error fn_noescape) {
+TGAImage* fn_nullable TGAImage::load(const void* fn_nonnull buffer fn_noescape, long bufferSize, TGAError* fn_nullable error fn_noescape) SWIFT_RETURNS_RETAINED {
     return load(TGASource(buffer, bufferSize), error);
 }
 
 
-void* fn_nonnull TGAImage::Unsafe::transferContentsOwnership(TGAImage* fn_nonnull tga) {
+void* fn_nonnull TGAImage::Unsafe::transferContentsOwnership(TGAImage* fn_nonnull tga fn_noescape) {
     tga->_ownsContents = false;
     return tga->_contents;
 }

@@ -25,9 +25,20 @@ let package = Package(
     targets: [
         .target(
             name: "FastTGAC",
+            cSettings: [
+                .enableWarning("all"),
+                .enableWarning("extra"),
+                .enableWarning("implicit-fallthrough"),
+                .enableWarning("int-conversion"),
+                .enableWarning("pointer-to-int-cast")
+            ],
             cxxSettings: [
-                .enableWarning("all")
-            ]
+                .enableWarning("all"),
+                .enableWarning("extra"),
+                .enableWarning("implicit-fallthrough"),
+                .enableWarning("int-conversion"),
+                .enableWarning("pointer-to-int-cast")
+            ],
         ),
         .target(
             name: "FastTGA",
